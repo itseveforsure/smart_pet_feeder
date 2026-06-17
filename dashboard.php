@@ -45,6 +45,34 @@ try {
     $device_status = getDeviceStatus();
 } catch(Exception $e) { echo "Error getting device status: " . $e->getMessage(); }
 
+// ThingSpeak Live Data
+$json = @file_get_contents(
+    "https://api.thingspeak.com/channels/3350840/feeds/last.json"
+);
+
+if ($json) {
+
+    $tsData = json_decode($json, true);
+
+    $distance = floatval($tsData['field1']);
+    $waterRaw = intval($tsData['field2']);
+
+    $foodLevel = 100 - (($distance - 5) / 20 * 100);
+    $foodLevel = round(max(0, min(100, $foodLevel)));
+
+    $waterLevel = round(($waterRaw / 1023) * 100);
+
+    $lastUpdate = strtotime($tsData['created_at']);
+
+    $deviceOnline = (time() - $lastUpdate) < 120;
+
+} else {
+
+    $foodLevel = 0;
+    $waterLevel = 0;
+    $deviceOnline = false;
+}
+
 // ========== FEEDING ANALYTICS & INSIGHTS ==========
 $analytics = [];
 $feeding_trends = [];
@@ -141,23 +169,55 @@ try {
 
 // Handle manual feeding
 $feed_success = null;
+
 if (isset($_POST['manual_feed']) && !empty($pets)) {
+
     $pet_id = $_POST['pet_id'];
     $fixed_portion = 50;
-    
+
     try {
-        $stmt = $pdo->prepare("INSERT INTO feeder_history (user_id, pet_id, portion_size, status, source) VALUES (?, ?, ?, 'success', 'manual')");
-        if ($stmt->execute([$user_id, $pet_id, $fixed_portion])) {
-            addNotification($user_id, '✅ Manual Feeding', "Dispensed {$fixed_portion}g of food for your pet.", 'success');
-            $feed_success = true;
-            redirect('dashboard.php');
-        } else {
-            addNotification($user_id, '❌ Feeding Failed', 'Manual feeding failed. Please check the device.', 'warning');
+
+        $stmt = $pdo->prepare("
+            INSERT INTO feeder_history 
+            (user_id, pet_id, portion_size, status, source) 
+            VALUES (?, ?, ?, 'success', 'manual')
+        ");
+
+ if ($stmt->execute([$user_id, $pet_id, $fixed_portion])) {
+
+  $url = "https://api.thingspeak.com/update?api_key=P0LV8WAJFKQ8FGVL&field3=1";
+
+$ch = curl_init();
+
+curl_setopt($ch, CURLOPT_URL, $url);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+$response = curl_exec($ch);
+
+curl_close($ch);
+
+    addNotification(
+        $user_id,
+        '✅ Manual Feeding',
+        "Dispensed {$fixed_portion}g of food for your pet.",
+        'success'
+    );
+
+    $feed_success = true;
+
+    redirect('dashboard.php');
+
+         } else {
+
             $feed_success = false;
         }
+
     } catch(Exception $e) {
-        $feed_success = false;
+
+        die($e->getMessage());
+
     }
+
 }
 
 // Toggle dark mode
@@ -504,36 +564,63 @@ try {
         </div>
     </nav>
     
-    <div class="container">
-        <!-- Stats Cards -->
-        <div class="stats-grid">
-            <div class="stat-card">
-                <h3>Device Status</h3>
-                <div class="stat-value"><?php echo ($device_status && $device_status['is_online']) ? '🟢 Online' : '🔴 Offline'; ?></div>
-                <div class="progress-bar"><div class="progress-fill" style="width: <?php echo ($device_status && $device_status['is_online']) ? '100%' : '0%'; ?>"></div></div>
-            </div>
-            <div class="stat-card">
-                <h3>Food Level</h3>
-                <div class="stat-value <?php echo ($device_status['food_level'] ?? 100) < 20 ? 'danger' : ''; ?>"><?php echo $device_status['food_level'] ?? 100; ?>%</div>
-                <div class="progress-bar"><div class="progress-fill" style="width: <?php echo $device_status['food_level'] ?? 100; ?>%"></div></div>
-                <?php if (($device_status['food_level'] ?? 100) < 20): ?>
-                    <p style="color: #dc3545; font-size: 12px; margin-top: 8px;">⚠️ Low food! Please refill.</p>
-                <?php endif; ?>
-            </div>
-            <div class="stat-card">
-                <h3>Water Level</h3>
-                <div class="stat-value <?php echo ($water_level['water_level_percent'] ?? 100) < 20 ? 'danger' : ''; ?>"><?php echo $water_level['water_level_percent'] ?? 100; ?>%</div>
-                <div class="progress-bar"><div class="progress-fill" style="width: <?php echo $water_level['water_level_percent'] ?? 100; ?>%"></div></div>
-                <?php if (($water_level['water_level_percent'] ?? 100) < 20): ?>
-                    <p style="color: #dc3545; font-size: 12px; margin-top: 8px;">⚠️ Low water! Please refill.</p>
-                <?php endif; ?>
-            </div>
-            <div class="stat-card">
-                <h3>Today's Feeds</h3>
-                <div class="stat-value"><?php echo $today_feeds; ?></div>
-                <div class="progress-bar"><div class="progress-fill" style="width: <?php echo min(($today_feeds / 4) * 100, 100); ?>%"></div></div>
+<div class="container">
+    <div class="stats-grid">
+
+        <div class="stat-card">
+            <h3>Device Status</h3>
+            <div class="stat-value"><?php echo $deviceOnline ? '🟢 Online' : '🔴 Offline'; ?></div>
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: <?php echo $deviceOnline ? '100%' : '0%'; ?>"></div>
             </div>
         </div>
+
+        <div class="stat-card">
+            <h3>Food Level</h3>
+            <div class="stat-value <?php echo $foodLevel < 20 ? 'danger' : ''; ?>">
+                <?php echo $foodLevel; ?>%
+            </div>
+
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: <?php echo $foodLevel; ?>%"></div>
+            </div>
+
+            <?php if ($foodLevel < 20): ?>
+                <p style="color: #dc3545; font-size: 12px; margin-top: 8px;">
+                    ⚠️ Low food! Please refill.
+                </p>
+            <?php endif; ?>
+        </div>
+
+        <div class="stat-card">
+            <h3>Water Level</h3>
+
+            <div class="stat-value <?php echo $waterLevel < 20 ? 'danger' : ''; ?>">
+                <?php echo $waterLevel; ?>%
+            </div>
+
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: <?php echo $waterLevel; ?>%"></div>
+            </div>
+
+            <?php if ($waterLevel < 20): ?>
+                <p style="color: #dc3545; font-size: 12px; margin-top: 8px;">
+                    ⚠️ Low water! Please refill.
+                </p>
+            <?php endif; ?>
+        </div>
+
+        <div class="stat-card">
+            <h3>Today's Feeds</h3>
+            <div class="stat-value"><?php echo $today_feeds; ?></div>
+
+            <div class="progress-bar">
+                <div class="progress-fill" style="width: <?php echo min(($today_feeds / 4) * 100, 100); ?>%"></div>
+            </div>
+        </div>
+
+    </div>
+</div>
 
         <!-- FEEDING ANALYTICS SECTION -->
         <?php if ($analytics && $analytics['total_feeds'] > 0): ?>
